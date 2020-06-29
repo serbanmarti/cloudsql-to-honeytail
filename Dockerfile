@@ -1,21 +1,21 @@
-FROM golang:1.13-alpine3.10 AS build
+FROM golang:1.14.4-alpine3.11 AS build
 
 RUN mkdir /src
 WORKDIR /src
 
-# Do go mod stuff first to cache if it hasn't changed
+# Get required Go modules first to cache them if nothing changed
 COPY go.mod .
 COPY go.sum .
 RUN go mod download
 
-COPY cmd/ ./cmd
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /go/bin/cloudsqltail ./cmd/cloudsqltail
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o /go/bin/cloudsqltail /src/cmd/cloudsqltail
 
 # runtime container
-FROM alpine:3.10
+FROM alpine:3.11
 
 RUN apk add --update ca-certificates
-# honeytail was compiled against libc, not musl, but they're compatible.
+# honeytail was compiled against libc, not musl, but they're compatible
 RUN mkdir /lib64 && ln -s /lib/libc.musl-x86_64.so.1 /lib64/ld-linux-x86-64.so.2
 
 RUN mkdir /app

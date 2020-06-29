@@ -3,157 +3,209 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"runtime"
 	"sort"
 	"sync"
 	"time"
 
+	"cloudsqltail/pkg/messages"
+
 	"cloud.google.com/go/pubsub"
 )
 
-// flags used for configuration
 var (
-	flagProject      = flag.String("project", "", "Google project ID")
-	flagSubscription = flag.String("subscription", "", "Google PubSub subscription name")
-
+	// Flags used for configuration
+	flagProject           = flag.String("project", "", "GCP Project ID")
+	flagSubscription      = flag.String("subscription", "", "GCP Pub/Sub Subscription name")
 	flagReceiveGoroutines = flag.Int(
 		"recv-routines",
 		runtime.NumCPU(),
-		"Number of goroutines to use to receive messages from the pubsub Subscription. default: runtime.NumCPUs()",
+		"Number of goroutines to use to receive messages from the Pub/Sub Subscription. [default: runtime.NumCPUs()]",
 	)
-
-	// flagFlushInterval is the duration used for ticker that flushes the
-	// buffer to STDOUT. A smaller duration will mean less memory usage but a
-	// higher probability of out-of-order messages in the output.
-	//
-	// Importantly, this duration also controls the data loss you are willing
-	// to tolerate in the event of an unclean shutdown. Messages are acked once
-	// put into this buffer, so if the program exits unexpectedly, any messages
-	// in buffer and not flushed to STDOUT will be lost.
 	flagFlushInterval = flag.Duration(
 		"flush-interval",
 		5*time.Second,
-		"Time between flushes of message buffer to STDOUT.",
+		"Time between flushes of message slice to STDOUT.",
 	)
+
+	// Used to store messages until they are flushed to Honeycomb
+	globalMessages []messages.ParsedMessage
+
+	// Mutex used to protect the global messages slice
+	mx sync.Mutex
 )
 
-// mx is the mutex used to proect the global message buffer
-var mx sync.Mutex
+func main() {
+	// Parse input flags
+	err := parseFlags()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "%+v\n", err)
+		os.Exit(1)
+	}
 
-// globalBuffer is the buffer used to store messages until flush
-var globalBuffer []ParsedMessage
+	// Create the process context
+	ctx := context.Background()
 
-// pgTimestamp is the format that postgres usually uses for timestamps, and
-// consequently what honeytail expects. It's almost but not quite
-// time.RFC3339Nano.
-const pgTimestamp = "2006-01-02 15:04:05.999999999 UTC"
+	// Create the subscription to Pub/Sub
+	sub, err := subscribeToPubSub(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "%+v\n", err)
+		os.Exit(1)
+	}
 
-// ParsedMessage holds the relevant details from a parsed Cloud Subscription message.
-type ParsedMessage struct {
-	TextPayload string    `json:"textPayload"`
-	Timestamp   time.Time `json:"timestamp"`
+	// Start the messages flush mechanism in a separate routine
+	go flushMessages(*flagFlushInterval)
+
+	// Serve the HTTP server in a separate routine
+	go serveHttpServer()
+
+	// Start a blocking call that waits to receive new messages
+	err = sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
+		// Parse the received message
+		parseMessage(msg.Data)
+
+		// Acknowledge that the message was received
+		msg.Ack()
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "%+v\n", err)
+		os.Exit(1)
+	}
 }
 
-func main() {
+// parseFlags given as input for missing or incorrect data
+func parseFlags() error {
 	flag.Parse()
 
 	switch "" {
 	case *flagProject:
-		fmt.Fprintf(os.Stderr, "must provide -project")
-		os.Exit(1)
+		return errors.New("must provide -project")
 	case *flagSubscription:
-		fmt.Fprintf(os.Stderr, "must provide -subscription")
-		os.Exit(1)
+		return errors.New("must provide -subscription")
 	}
+
+	if *flagReceiveGoroutines < 1 {
+		_, err := fmt.Fprintf(
+			os.Stdout,
+			`WARNING: Cannot have "%d" routines. Using default value of "%d"!`,
+			*flagReceiveGoroutines, pubsub.DefaultReceiveSettings.NumGoroutines,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
 	if *flagFlushInterval < 1 {
-		fmt.Fprintf(os.Stderr, "flush internal '%s' must be > 0", *flagFlushInterval)
-		os.Exit(1)
+		return errors.New(fmt.Sprintf("flush internal '%s' must be > 0", *flagFlushInterval))
 	} else if *flagFlushInterval < time.Second {
-		fmt.Fprintf(
-			os.Stderr,
-			`WARNING: using an small flush interval may result in more out-of-order output. Are you sure you didn't mean "%ds"?`,
-			*flagFlushInterval)
+		_, err := fmt.Fprintf(
+			os.Stdout,
+			`WARNING: Using an small flush interval may result in more out-of-order output. Are you sure you didn't mean "%ds"?`,
+			*flagFlushInterval,
+		)
+		if err != nil {
+			return err
+		}
 	}
 
-	ctx := context.Background()
-	c, err := pubsub.NewClient(ctx, *flagProject)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%+v\n", err)
-		os.Exit(1)
-	}
+	return nil
+}
 
-	sub := c.Subscription(*flagSubscription)
-	sub.ReceiveSettings.NumGoroutines = *flagReceiveGoroutines
-
-	// this is a forever ticker that periodically
-	go flushBuffer(*flagFlushInterval)
-
-	err = sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
-		bufferMessage(msg.Data)
-		msg.Ack()
+// serveHttpServer for liveness/readiness check by GKE probe
+func serveHttpServer() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		_, err := fmt.Fprint(w, "Alive!")
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "could not return HTTP response: %s", err.Error())
+			os.Exit(1)
+		}
 	})
+	err := http.ListenAndServe(":5000", nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%+v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "could not start HTTP server: %s", err.Error())
 		os.Exit(1)
 	}
 }
 
-// bufferMessage takes a message's unparsed JSON data, parses it, and appends a
-// ParsedMessage to the global message buffer.
-func bufferMessage(data []byte) {
-	var pm ParsedMessage
+// parseMessage that is received, by taking the given JSON data,
+// parsing it and appending the ParsedMessage to the global messages slice
+func parseMessage(data []byte) {
+	var pm messages.ParsedMessage
+
+	// Parse the JSON data
 	if err := json.Unmarshal(data, &pm); err != nil {
+		// Ignore it if it is erroneous
 		return
 	}
 
+	// Get a lock on the messages slice
 	mx.Lock()
-	globalBuffer = append(globalBuffer, pm)
-	mx.Unlock()
+	defer mx.Unlock()
+
+	// Add the new message to the slice
+	globalMessages = append(globalMessages, pm)
 }
 
-// flushBuffer sets up a ticker to flush the message buffer every 'dur'.
-// Each tick locks then sorts the message buffer based on the Timestamp,
-// then outputs the buffer sequentially to to STDOUT. Some notes:
-//
-// Subscriptions make no guarantee about the ordering of delivered
-// messages, so we sort all buffered messages before output. This does
-// not guarantee that we don't ever miss or mangle messages, but it
-// gets to mostly correct.
-//
-// Postgres query logs can span multiple lines.
-// The first line always has a prefix, which we know starts with the
-// [PID] in brackets, while the following lines are \t indented.
-// Add the timestamp from the pubsub message to initial lines and
-// pass-through remaining lines unmodified.
-func flushBuffer(dur time.Duration) {
-	tick := time.NewTicker(dur)
+// subscribeToPubSub subscription in order to receive messages from logs
+func subscribeToPubSub(ctx context.Context) (*pubsub.Subscription, error) {
+	// Create a new Pub/Sub client for the given GCP project
+	c, err := pubsub.NewClient(ctx, *flagProject)
+	if err != nil {
+		return nil, err
+	}
+
+	// Subscribe into the given Pub/Sub subscription
+	sub := c.Subscription(*flagSubscription)
+	sub.ReceiveSettings.NumGoroutines = *flagReceiveGoroutines
+
+	return sub, nil
+}
+
+// flushMessages will flush the message slice on every tick
+func flushMessages(d time.Duration) {
+	// Create a ticker for that helps us wait 'dur' to flush
+	tick := time.NewTicker(d)
+
 	for {
+		// Wait for the next tick
 		<-tick.C
+
+		// Get a lock on the messages slice
 		mx.Lock()
 
-		sort.Slice(globalBuffer, func(i, j int) bool {
-			return globalBuffer[i].Timestamp.Before(globalBuffer[j].Timestamp)
-		})
+		// If no messages available, ignore
+		if len(globalMessages) > 0 {
+			// Sort the messages by timestamp
+			sort.Slice(globalMessages, func(i, j int) bool {
+				return globalMessages[i].Timestamp.Before(globalMessages[j].Timestamp)
+			})
 
-		for i := range globalBuffer {
-			msg := &globalBuffer[i]
+			// Run through all messages
+			for i := range globalMessages {
+				msg := &globalMessages[i]
 
-			if msg.TextPayload[0] == '[' {
-				timestamp := globalBuffer[i].Timestamp.Format(pgTimestamp)
-				fmt.Printf("[%s]: %s\n", timestamp, globalBuffer[i].TextPayload)
-			} else {
-				fmt.Println(globalBuffer[i].TextPayload)
+				if msg.TextPayload != "" {
+					// Print the timestamp if we have the first line in a message sequence
+					if msg.TextPayload[0] == '[' {
+						timestamp := globalMessages[i].Timestamp.Format("2006-01-02 15:04:05.999999999 UTC") // format that pg uses
+						fmt.Printf("[%s]: %s\n", timestamp, globalMessages[i].TextPayload)
+					} else {
+						fmt.Println(globalMessages[i].TextPayload)
+					}
+				}
 			}
+
+			// Reset the global messages slice, pre-allocating enough capacity to
+			// fit the same number of messages as we saw last time.
+			globalMessages = make([]messages.ParsedMessage, 0, len(globalMessages))
 		}
 
-		// Reset the global entries slice, pre-allocating enough capacity to
-		// fit the same number of messages as we saw last time. This trades
-		// some memory usage for not having to copy the slice a bunch when we
-		// append() in bufferMessage.
-		globalBuffer = make([]ParsedMessage, 0, len(globalBuffer))
+		// Release the lock on the messages slice
 		mx.Unlock()
 	}
 }
