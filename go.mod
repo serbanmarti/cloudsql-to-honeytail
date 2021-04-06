@@ -1,19 +1,15 @@
 module cloudsqltail
 
-go 1.14
+go 1.16
 
 require (
-	cloud.google.com/go v0.59.0 // indirect
-	cloud.google.com/go/datastore v1.2.0 // indirect
-	cloud.google.com/go/pubsub v1.4.0
-	cloud.google.com/go/storage v1.10.0 // indirect
-	go.opencensus.io v0.22.4 // indirect
-	golang.org/x/net v0.0.0-20200625001655-4c5254603344 // indirect
-	golang.org/x/sync v0.0.0-20200625203802-6e8e738ad208 // indirect
-	golang.org/x/sys v0.0.0-20200625212154-ddb9806d33ae // indirect
-	golang.org/x/text v0.3.3 // indirect
-	golang.org/x/tools v0.0.0-20200626171337-aa94e735be7f // indirect
-	google.golang.org/genproto v0.0.0-20200626011028-ee7919e894b5 // indirect
-	google.golang.org/grpc v1.30.0 // indirect
-	google.golang.org/protobuf v1.25.0 // indirect
+	cloud.google.com/go v0.81.0 // indirect
+	cloud.google.com/go/pubsub v1.10.1
+	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
+	golang.org/x/mod v0.4.2 // indirect
+	golang.org/x/net v0.0.0-20210405180319-a5a99cb37ef4 // indirect
+	golang.org/x/oauth2 v0.0.0-20210402161424-2e8d93401602 // indirect
+	golang.org/x/sys v0.0.0-20210403161142-5e06dd20ab57 // indirect
+	golang.org/x/text v0.3.6 // indirect
+	google.golang.org/genproto v0.0.0-20210405174219-a39eb2f71cb9 // indirect
 )

@@ -1,4 +1,4 @@
-FROM golang:1.14.4-alpine3.11 AS build
+FROM golang:1.16.3-alpine3.13 AS build
 
 RUN mkdir /src
 WORKDIR /src
@@ -12,7 +12,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o /go/bin/cloudsqltail /src/cmd/cloudsqltail
 
 # runtime container
-FROM alpine:3.11
+FROM alpine:3.13
 
 RUN apk add --update ca-certificates
 # honeytail was compiled against libc, not musl, but they're compatible

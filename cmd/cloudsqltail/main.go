@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"cloudsqltail/pkg/messages"
-
 	"cloud.google.com/go/pubsub"
+
+	"cloudsqltail/messages"
 )
 
 var (
@@ -116,7 +116,7 @@ func parseFlags() error {
 	return nil
 }
 
-// serveHttpServer for liveness/readiness check by GKE probe
+// serveHttpServer for liveliness/readiness check by GKE probe
 func serveHttpServer() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		_, err := fmt.Fprint(w, "Alive!")
